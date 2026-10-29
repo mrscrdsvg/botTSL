@@ -74,7 +74,7 @@ def send_telegram_alert(msg_id, client_msg, ai_reply):
 # --- ACTION D'ENVOI AUTOMATISÉ SUR TASTYSLIPS ---
 async def send_reply_to_tastyslips(reply_text):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
         context = await browser.new_context()
         page = await context.new_page()
         
@@ -96,7 +96,7 @@ async def send_reply_to_tastyslips(reply_text):
 # --- BOT DE SURVEILLANCE AUTONOME ---
 async def run_tastyslips_watcher():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
         context = await browser.new_context()
         page = await context.new_page()
         
