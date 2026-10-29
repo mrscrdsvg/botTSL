@@ -1,5 +1,6 @@
 import os
 import requests
+from datetime import datetime
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -8,7 +9,6 @@ TELEGRAM_BOT_TOKEN = "9151678108:AAEDK84KdO-dc_CiWTtvoFkqUiiHOKzgutU"
 TELEGRAM_CHAT_ID = "8318321568"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# Dictionnaire pour stocker les messages en attente de validation {telegram_message_id: data}
 PENDING_MESSAGES = {}
 processed_messages = set()
 
@@ -25,6 +25,26 @@ TON ET STYLE :
 - Adapte le tutoiement ou vouvoiement selon comment le client s'adresse à toi.
 - Pas de prix fixes (dis juste que tu prends note pour confirmer le tarif).
 - Style direct, zéro guillemets, zéro formule robotique."""
+
+def analyze_context(client_message):
+    """Génère rapidement un mini-contexte pour savoir de quoi parle la discussion."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "Résume le sujet de cette discussion en 3 ou 4 mots maximum (ex: Vente de vêtement, Question tarif, Négociation...). Soit très bref."},
+            {"role": "user", "content": client_message}
+        ],
+        "temperature": 0.3
+    }
+    try:
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data)
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except:
+                return "Discussion en cours"
 
 def ask_openai(client_message):
     headers = {
@@ -52,7 +72,7 @@ def ask_openai(client_message):
 
 def send_reply_to_tastyslips(reply_url, message_text):
     if not reply_url:
-        print("Erreur: Aucune URL de réponse fournie par TastySlips", flush=True)
+        print("Erreur: Aucune URL de réponse fournie", flush=True)
         return False
     try:
         payload = {"message": message_text}
@@ -63,13 +83,22 @@ def send_reply_to_tastyslips(reply_url, message_text):
         return False
 
 def send_telegram_approval(client_message, ai_reply, is_returning, reply_url):
+    now = datetime.now()
+    date_str = now.strftime("%d/%m/%Y")
+    heure_str = now.strftime("%H:%M")
+    
+    # Analyse rapide du contexte
+    context_topic = analyze_context(client_message)
+
     tag = "⭐ **CLIENT RÉCURRENT**" if is_returning else "🚨 **NOUVEAU MESSAGE CLIENT**"
+    
     text = (
-        f"{tag}\n\n"
-        f"💬 **Message reçu** :\n{client_message}\n\n"
-        f"🤖 **Proposition IA** :\n{ai_reply}\n\n"
-        f"👉 *Pour valider tel quel, clique sur le bouton ci-dessous.*\n"
-        f"👉 *Pour modifier, réponds simplement à ce message avec ton propre texte !*"
+        f"{tag}\n"
+        f"📌 **Contexte :** _{context_topic}_\n"
+        f"📅 **Date :** {date_str} à {heure_str}\n\n"
+        f"💬 **Message reçu :**\n{client_message}\n\n"
+        f"🤖 **Proposition IA :**\n{ai_reply}\n\n"
+        f"👉 *Clique ci-dessous pour envoyer ou réponds au message pour modifier.*"
     )
     
     keyboard = {
@@ -100,7 +129,7 @@ def send_telegram_approval(client_message, ai_reply, is_returning, reply_url):
 
 @app.route('/')
 def home():
-    return "Serveur Bot TastySlips actif avec validation !"
+    return "Serveur Bot TastySlips actif !"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -114,19 +143,20 @@ def webhook():
     reply_url = data.get("reply_url") or data.get("url")
 
     if "supprimé" in sender_status or "deleted" in sender_status or not client_message:
-        return "Ignoré (Compte supprimé ou vide)", 200
+        return "Ignoré", 200
 
+    # Anti-doublon strict (ignore si le message exact a déjà été traité récemment)
     if client_message in processed_messages:
         return "Déjà traité", 200
 
     processed_messages.add(client_message)
-    if len(processed_messages) > 500:
-        processed_messages.pop()
+    if len(processed_messages) > 200:
+        processed_messages.pop(0)
 
     ai_reply = ask_openai(client_message)
     send_telegram_approval(client_message, ai_reply, is_returning, reply_url)
 
-    return "Message mis en attente de validation", 200
+    return "OK", 200
 
 @app.route('/telegram_webhook', methods=['POST'])
 def telegram_webhook():
@@ -144,10 +174,10 @@ def telegram_webhook():
         if tg_msg_id in PENDING_MESSAGES:
             pending = PENDING_MESSAGES[tg_msg_id]
             if data_action == "approve":
-                success = send_reply_to_tastyslips(pending["reply_url"], pending["ai_reply"])
+                # Envoi effectif de la réponse vers la plateforme
+                send_reply_to_tastyslips(pending["reply_url"], pending["ai_reply"])
                 edit_text = cq["message"]["text"] + "\n\n✅ **STATUT : Envoyé avec succès !**"
             else:
-                success = True
                 edit_text = cq["message"]["text"] + "\n\n❌ **STATUT : Ignoré.**"
                 
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json={
@@ -159,7 +189,7 @@ def telegram_webhook():
             requests.post(url_answer, json={"callback_query_id": cq["id"], "text": "Action prise en compte !"})
             del PENDING_MESSAGES[tg_msg_id]
         else:
-            requests.post(url_answer, json={"callback_query_id": cq["id"], "text": "Message déjà traité ou expiré."})
+            requests.post(url_answer, json={"callback_query_id": cq["id"], "text": "Déjà traité ou expiré."})
 
     elif "message" in update and "reply_to_message" in update["message"]:
         msg = update["message"]
@@ -168,11 +198,11 @@ def telegram_webhook():
         
         if replied_msg_id in PENDING_MESSAGES and custom_reply_text:
             pending = PENDING_MESSAGES[replied_msg_id]
-            success = send_reply_to_tastyslips(pending["reply_url"], custom_reply_text)
+            send_reply_to_tastyslips(pending["reply_url"], custom_reply_text)
             
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": f"✍️ **Message modifié et envoyé avec succès :**\n{custom_reply_text}",
+                "text": f"✍️ **Modifié et envoyé :**\n{custom_reply_text}",
                 "parse_mode": "Markdown"
             })
             del PENDING_MESSAGES[replied_msg_id]
