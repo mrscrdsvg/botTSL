@@ -163,7 +163,7 @@ def telegram_webhook():
             "text": f"✅ Version modifiée envoyée au client :\n\"{modified_text}\""
         })
 
-    return jsonify({"status": "ok"}}, 200
+    return jsonify({"status": "ok"}), 200
 
 @app.route('/')
 def home():
