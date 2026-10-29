@@ -8,15 +8,14 @@ from playwright.async_api import async_playwright
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ENVRIONNEMENT ---
+# --- CONFIGURATION ENVIRONNEMENT ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9151678108:AAEDK84KdO-dc_CiWTtvoFkqUiiHOKzgutU")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "8318321568")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TASTYSLIPS_COOKIE = os.getenv("TASTYSLIPS_COOKIE")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Dictionnaire temporaire pour stocker les propositions en attente de validation
+# Dictionnaire pour stocker les messages en attente
 pending_replies = {}
 
 # --- SYSTEM PROMPT POUR L'IA ---
@@ -26,7 +25,7 @@ Tu es l'assistante virtuelle d'Amaris Creed sur TastySlips. Ton ton doit être n
 CONSIGNES STRICTES DE STYLE :
 - Pas de sur-utilisation de points d'exclamation.
 - Maximum UN SEUL emoji à la toute fin du message.
-- Langue : Réponds en FRANÇAIS si le client écrit en français. Si le client écrit dans n'importe quelle AUTRE langue (anglais, allemand, espagnol, etc.), réponds obligatoirement en ANGLAIS.
+- Langue : Réponds en FRANÇAIS si le client écrit en français. Si le client écrit dans n'importe quelle AUTRE langue, réponds obligatoirement en ANGLAIS.
 
 CONSIGNES MÉTIER :
 1. Plateformes externes (Snapchat, Telegram, WhatsApp, etc.) : Refuse poliment. Dis que tout se passe exclusivement sur TastySlips.
@@ -72,34 +71,42 @@ def send_telegram_alert(msg_id, client_msg, ai_reply):
     }
     requests.post(url, json=payload)
 
-# --- BOT DE SURVEILLANCE AUTONOME (PLAYWRIGHT) ---
-async def run_tastyslips_watcher():
-    if not TASTYSLIPS_COOKIE:
-        print("[ERR] TASTYSLIPS_COOKIE manquant dans l'environnement.")
-        return
-
+# --- ACTION D'ENVOI AUTOMATISÉ SUR TASTYSLIPS ---
+async def send_reply_to_tastyslips(reply_text):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
-        
-        # Injection du cookie de session
-        await context.add_cookies([{
-            'name': 'session', # À adapter selon le nom exact du cookie TastySlips
-            'value': TASTYSLIPS_COOKIE,
-            'domain': '.tastyslips.com',
-            'path': '/'
-        }])
-
         page = await context.new_page()
-        print("[Watcher] Connexion autonome à TastySlips lancée...")
+        
+        try:
+            # Navigation vers la page des messages
+            await page.goto("https://www.tastyslips.com/messages", wait_until="networkidle")
+            
+            # Simulation de la saisie dans le champ de message et clic sur envoyer
+            # (S'adapte aux sélecteurs standards de messagerie)
+            await page.fill("textarea, input[type='text']", reply_text)
+            await page.keyboard.press("Enter")
+            
+            print(f"[Playwright] Réponse envoyée avec succès sur le site : {reply_text}")
+        except Exception as e:
+            print(f"[Playwright Erreur d'envoi] : {e}")
+        finally:
+            await browser.close()
 
+# --- BOT DE SURVEILLANCE AUTONOME ---
+async def run_tastyslips_watcher():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        
+        print("[Watcher] Démarrage de la surveillance autonome...")
         last_processed_msg = ""
 
         while True:
             try:
                 await page.goto("https://www.tastyslips.com/messages", wait_until="networkidle")
                 
-                # Extraction du dernier message reçu
                 message_el = await page.query_selector('.text-sm, .truncate')
                 if message_el:
                     text = (await message_el.inner_text()).strip()
@@ -108,28 +115,24 @@ async def run_tastyslips_watcher():
                         last_processed_msg = text
                         msg_id = str(hash(text))
                         
-                        # Génération de la réponse via l'IA
                         ai_reply = generate_ai_reply(text)
                         pending_replies[msg_id] = {
                             "client_msg": text,
                             "reply": ai_reply
                         }
                         
-                        # Envoi de l'alerte Telegram
                         send_telegram_alert(msg_id, text, ai_reply)
 
             except Exception as e:
                 print(f"[Watcher Error] {e}")
 
-            # Attente de 60 secondes avant la prochaine vérification
             await asyncio.sleep(60)
 
-# --- WEBHOOK TELEGRAM POUR VALIDATION / MODIFICATION ---
+# --- WEBHOOK TELEGRAM ---
 @app.route('/telegram_webhook', methods=['POST'])
 def telegram_webhook():
     data = request.get_json()
 
-    # 1. Gestion du clic sur le bouton "Valider"
     if "callback_query" in data:
         callback = data["callback_query"]
         callback_id = callback["id"]
@@ -140,8 +143,8 @@ def telegram_webhook():
             if msg_id in pending_replies:
                 final_text = pending_replies[msg_id]["reply"]
                 
-                # TODO: Envoyer la réponse sur TastySlips via Playwright
-                print(f"[ENVOI EFFECTUÉ] : {final_text}")
+                # Exécution de l'envoi automatisé
+                asyncio.run(send_reply_to_tastyslips(final_text))
 
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={
                     "callback_query_id": callback_id,
@@ -149,19 +152,18 @@ def telegram_webhook():
                 })
                 del pending_replies[msg_id]
 
-    # 2. Gestion de la modification par réponse directe sur Telegram
     elif "message" in data and "reply_to_message" in data["message"]:
         modified_text = data["message"]["text"]
         
-        # On envoie la version modifiée
-        print(f"[ENVOI TEXTE MODIFIÉ] : {modified_text}")
+        # Envoi de la version modifiée saisie sur Telegram
+        asyncio.run(send_reply_to_tastyslips(modified_text))
         
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"✅ Ta version modifiée a bien été envoyée :\n\"{modified_text}\""
+            "text": f"✅ Version modifiée envoyée au client :\n\"{modified_text}\""
         })
 
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"}}, 200
 
 @app.route('/')
 def home():
@@ -173,10 +175,8 @@ def start_async_loop():
     loop.run_until_complete(run_tastyslips_watcher())
 
 if __name__ == '__main__':
-    # Lancement du navigateur de surveillance en arrière-plan
     t = Thread(target=start_async_loop)
     t.daemon = True
     t.start()
     
-    # Lancement de l'application Flask
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
